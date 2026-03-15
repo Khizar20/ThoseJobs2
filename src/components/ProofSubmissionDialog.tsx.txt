@@ -1,0 +1,507 @@
+import { useState, useRef } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/lib/supabaseClient";
+import { verifyImages, VerificationResult } from "@/lib/imageVerificationService";
+import {
+  Upload,
+  X,
+  CheckCircle,
+  AlertCircle,
+  Loader2,
+  Image as ImageIcon,
+  FileText,
+} from "lucide-react";
+
+interface ProofSubmissionDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  jobId: string;
+  jobTitle: string;
+  jobStartTime: string | null;
+  jobDeadline: string | null;
+  jobCategory: string;
+  referenceImages?: string[];
+  onSuccess: () => void;
+}
+
+export function ProofSubmissionDialog({
+  open,
+  onOpenChange,
+  jobId,
+  jobTitle,
+  jobStartTime,
+  jobDeadline,
+  jobCategory,
+  referenceImages,
+  onSuccess,
+}: ProofSubmissionDialogProps) {
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [verificationResults, setVerificationResults] = useState<VerificationResult[]>([]);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [notes, setNotes] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { toast } = useToast();
+
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+
+    // Limit to 10 images
+    if (files.length > 10) {
+      toast({
+        title: "Too many files",
+        description: "Please select a maximum of 10 images.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSelectedFiles(files);
+    setIsVerifying(true);
+
+    try {
+      // Verify all images
+      const results = await verifyImages(
+        files,
+        jobId,
+        jobStartTime,
+        jobDeadline,
+        jobCategory,
+        referenceImages
+      );
+
+      setVerificationResults(results);
+
+      // Check if any failed
+      const failedCount = results.filter(r => r.status === 'failed').length;
+      if (failedCount > 0) {
+        toast({
+          title: "Verification Failed",
+          description: `${failedCount} image(s) failed verification. Please check the details.`,
+          variant: "destructive",
+        });
+      }
+
+      // Check if any flagged
+      const flaggedCount = results.filter(r => r.status === 'flagged').length;
+      if (flaggedCount > 0) {
+        toast({
+          title: "Images Flagged for Review",
+          description: `${flaggedCount} image(s) have been flagged and will require admin review.`,
+        });
+      }
+    } catch (error: any) {
+      console.error("Verification error:", error);
+      toast({
+        title: "Verification Error",
+        description: error.message || "Failed to verify images. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const removeFile = (index: number) => {
+    const newFiles = selectedFiles.filter((_, i) => i !== index);
+    const newResults = verificationResults.filter((_, i) => i !== index);
+    setSelectedFiles(newFiles);
+    setVerificationResults(newResults);
+  };
+
+  const handleSubmit = async () => {
+    if (selectedFiles.length === 0) {
+      toast({
+        title: "No Images",
+        description: "Please select at least one image to submit.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Check if any images failed verification
+    const failedImages = verificationResults.filter(r => r.status === 'failed');
+    if (failedImages.length > 0) {
+      toast({
+        title: "Cannot Submit",
+        description: "Some images failed verification. Please remove them or upload new ones.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsUploading(true);
+
+    try {
+      const uploadedMedia = [];
+
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const file = selectedFiles[i];
+        const verification = verificationResults[i];
+
+        // Upload file to Supabase Storage
+        const fileExt = file.name.split('.').pop();
+        const fileName = `${jobId}/${Date.now()}_${i}.${fileExt}`;
+        const filePath = `job-media/${fileName}`;
+
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from('job-media')
+          .upload(filePath, file, {
+            cacheControl: '3600',
+            upsert: false,
+          });
+
+        if (uploadError) {
+          throw new Error(`Failed to upload ${file.name}: ${uploadError.message}`);
+        }
+
+        // Get public URL
+        const { data: urlData } = supabase.storage
+          .from('job-media')
+          .getPublicUrl(filePath);
+
+        // Save to job_media table
+        const { data: mediaData, error: mediaError } = await supabase
+          .from('job_media')
+          .insert({
+            job_id: jobId,
+            worker_id: (await supabase.auth.getUser()).data.user?.id,
+            file_url: urlData.publicUrl,
+            file_type: 'image',
+            file_hash: verification.fileHash,
+            ai_verified: verification.status === 'passed',
+            ai_verification_result: {
+              status: verification.status,
+              checks: verification.checks,
+              flags: verification.flags,
+              requiresReview: verification.requiresReview,
+              metadata: verification.metadata,
+            },
+          })
+          .select()
+          .single();
+
+        if (mediaError) {
+          throw new Error(`Failed to save media record: ${mediaError.message}`);
+        }
+
+        uploadedMedia.push(mediaData);
+      }
+
+      // Update job status to 'submitted'
+      const { error: jobError } = await supabase
+        .from('jobs')
+        .update({
+          status: 'submitted',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', jobId);
+
+      if (jobError) {
+        throw new Error(`Failed to update job status: ${jobError.message}`);
+      }
+
+      // Update job assignment status
+      const { error: assignmentError } = await supabase
+        .from('job_assignments')
+        .update({
+          status: 'submitted',
+          submitted_at: new Date().toISOString(),
+          notes: notes.trim() || null,
+        })
+        .eq('job_id', jobId)
+        .eq('worker_id', (await supabase.auth.getUser()).data.user?.id);
+
+      if (assignmentError) {
+        console.error('Assignment update error:', assignmentError);
+        // Don't fail the whole operation if assignment update fails
+      }
+
+      toast({
+        title: "Proof Submitted!",
+        description: "Your proof has been submitted successfully. The requester will review it.",
+        variant: "success",
+      });
+
+      // Reset form
+      setSelectedFiles([]);
+      setVerificationResults([]);
+      setNotes("");
+      onOpenChange(false);
+      onSuccess();
+    } catch (error: any) {
+      console.error("Submission error:", error);
+      toast({
+        title: "Submission Failed",
+        description: error.message || "Failed to submit proof. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const getStatusBadge = (status: VerificationResult['status']) => {
+    switch (status) {
+      case 'passed':
+        return <Badge className="bg-green-100 text-green-800">✓ Verified</Badge>;
+      case 'flagged':
+        return <Badge className="bg-yellow-100 text-yellow-800">⚠ Flagged</Badge>;
+      case 'failed':
+        return <Badge className="bg-red-100 text-red-800">✗ Failed</Badge>;
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto bg-white dark:bg-gray-900 border-2 border-gray-200 dark:border-gray-700 shadow-xl">
+        <DialogHeader className="bg-gradient-to-r from-primary/10 to-transparent p-4 -m-6 mb-4 rounded-t-lg border-b border-gray-200 dark:border-gray-700">
+          <DialogTitle className="text-2xl font-bold text-gray-900 dark:text-white">Submit Proof for: {jobTitle}</DialogTitle>
+          <DialogDescription className="text-gray-600 dark:text-gray-300">
+            Upload images as proof of completed work. All images will be verified automatically.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-6 mt-4 bg-white dark:bg-gray-900 p-4 rounded-lg">
+          {/* File Upload */}
+          <div>
+            <Label htmlFor="proof-images">Upload Images (Max 10)</Label>
+            <div className="mt-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                id="proof-images"
+                accept="image/jpeg,image/jpg,image/png,image/heic,image/heif"
+                multiple
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full"
+                disabled={isVerifying || isUploading}
+              >
+                <Upload className="w-4 h-4 mr-2" />
+                {selectedFiles.length > 0
+                  ? `Change Images (${selectedFiles.length} selected)`
+                  : "Select Images"}
+              </Button>
+            </div>
+          </div>
+
+          {/* Verification Status */}
+          {isVerifying && (
+            <Alert className="bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800">
+              <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+              <AlertDescription className="text-blue-800 dark:text-blue-200">Verifying images...</AlertDescription>
+            </Alert>
+          )}
+
+          {/* Selected Files with Verification Results */}
+          {selectedFiles.length > 0 && (
+            <div className="space-y-3">
+              <Label className="text-base font-semibold text-gray-900 dark:text-white">Selected Images</Label>
+              {selectedFiles.map((file, index) => {
+                const verification = verificationResults[index];
+                const hasIssues = verification && verification.status !== 'passed';
+
+                return (
+                  <div
+                    key={index}
+                    className={`border-2 rounded-lg p-4 bg-white dark:bg-gray-800 ${
+                      verification?.status === 'failed' 
+                        ? 'border-red-300 bg-red-50 dark:bg-red-900/20 dark:border-red-800' 
+                        : verification?.status === 'flagged'
+                        ? 'border-yellow-300 bg-yellow-50 dark:bg-yellow-900/20 dark:border-yellow-800'
+                        : 'border-green-200 bg-green-50 dark:bg-green-900/20 dark:border-green-800'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-start gap-3 flex-1">
+                        <div className={`p-2 rounded-lg ${
+                          verification?.status === 'failed'
+                            ? 'bg-red-100 dark:bg-red-900/30'
+                            : verification?.status === 'flagged'
+                            ? 'bg-yellow-100 dark:bg-yellow-900/30'
+                            : 'bg-green-100 dark:bg-green-900/30'
+                        }`}>
+                          <ImageIcon className={`w-5 h-5 ${
+                            verification?.status === 'failed'
+                              ? 'text-red-600 dark:text-red-400'
+                              : verification?.status === 'flagged'
+                              ? 'text-yellow-600 dark:text-yellow-400'
+                              : 'text-green-600 dark:text-green-400'
+                          }`} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-gray-900 dark:text-white truncate">{file.name}</p>
+                          <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                            {(file.size / 1024).toFixed(0)} KB
+                            {verification?.metadata?.dimensions && 
+                              ` • ${verification.metadata.dimensions.width}x${verification.metadata.dimensions.height}px`
+                            }
+                          </p>
+                          {verification && (
+                            <div className="mt-2">
+                              {getStatusBadge(verification.status)}
+                              {hasIssues && (
+                                <div className="mt-2 space-y-1">
+                                  {!verification.checks.duplicate.passed && (
+                                    <p className="text-xs text-red-700 dark:text-red-400 font-medium">
+                                      • {verification.checks.duplicate.message}
+                                    </p>
+                                  )}
+                                  {!verification.checks.quality.passed && (
+                                    <p className="text-xs text-red-700 dark:text-red-400 font-medium">
+                                      • {verification.checks.quality.message}
+                                    </p>
+                                  )}
+                                  {!verification.checks.timestamp.passed && (
+                                    <p className="text-xs text-yellow-700 dark:text-yellow-400 font-medium">
+                                      • {verification.checks.timestamp.message}
+                                    </p>
+                                  )}
+                                  {!verification.checks.content.passed && (
+                                    <p className="text-xs text-yellow-700 dark:text-yellow-400 font-medium">
+                                      • {verification.checks.content.message}
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => removeFile(index)}
+                        disabled={isUploading}
+                        className="hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400"
+                      >
+                        <X className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Notes Field */}
+          <div className="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg border border-gray-200 dark:border-gray-700">
+            <Label htmlFor="notes" className="text-base font-semibold text-gray-900 dark:text-white">Additional Notes (Optional)</Label>
+            <Textarea
+              id="notes"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Add any additional information about the completed work..."
+              className="mt-2 bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white"
+              rows={3}
+              disabled={isUploading}
+            />
+          </div>
+
+          {/* Summary */}
+          {verificationResults.length > 0 && (
+            <Alert className={`${
+              verificationResults.some(r => r.status === 'failed')
+                ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
+                : verificationResults.some(r => r.status === 'flagged')
+                ? 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800'
+                : 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+            }`}>
+              <AlertCircle className={`h-4 w-4 ${
+                verificationResults.some(r => r.status === 'failed')
+                  ? 'text-red-600 dark:text-red-400'
+                  : verificationResults.some(r => r.status === 'flagged')
+                  ? 'text-yellow-600 dark:text-yellow-400'
+                  : 'text-green-600 dark:text-green-400'
+              }`} />
+              <AlertDescription className={`${
+                verificationResults.some(r => r.status === 'failed')
+                  ? 'text-red-800 dark:text-red-200'
+                  : verificationResults.some(r => r.status === 'flagged')
+                  ? 'text-yellow-800 dark:text-yellow-200'
+                  : 'text-green-800 dark:text-green-200'
+              }`}>
+                <div className="space-y-1">
+                  <p className="font-semibold">
+                    Verification Summary:
+                  </p>
+                  <p>
+                    • {verificationResults.filter(r => r.status === 'passed').length} image(s)
+                    verified ✓
+                  </p>
+                  {verificationResults.filter(r => r.status === 'flagged').length > 0 && (
+                    <p className="font-medium">
+                      • {verificationResults.filter(r => r.status === 'flagged').length} image(s)
+                      flagged for admin review ⚠
+                    </p>
+                  )}
+                  {verificationResults.filter(r => r.status === 'failed').length > 0 && (
+                    <p className="font-medium">
+                      • {verificationResults.filter(r => r.status === 'failed').length} image(s)
+                      failed verification (must be removed) ✗
+                    </p>
+                  )}
+                </div>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Submit Button */}
+          <div className="flex justify-end gap-3 pt-4 border-t border-gray-200 dark:border-gray-700">
+            <Button
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={isUploading}
+              className="bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSubmit}
+              disabled={
+                isUploading ||
+                isVerifying ||
+                selectedFiles.length === 0 ||
+                verificationResults.some(r => r.status === 'failed')
+              }
+              className="bg-primary hover:bg-primary/90 text-white font-semibold px-6 border-2 border-black dark:border-white shadow-lg"
+            >
+              {isUploading ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Uploading...
+                </>
+              ) : (
+                <>
+                  <CheckCircle className="w-4 h-4 mr-2" />
+                  Submit Proof
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+

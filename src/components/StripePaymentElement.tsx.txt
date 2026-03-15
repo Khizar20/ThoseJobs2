@@ -1,0 +1,241 @@
+/**
+ * Stripe Payment Element Component
+ * Handles card payment collection using Stripe Elements
+ */
+
+import { useEffect, useState } from 'react';
+import { loadStripe, StripeElementsOptions } from '@stripe/stripe-js';
+import {
+  Elements,
+  PaymentElement,
+  useStripe,
+  useElements
+} from '@stripe/react-stripe-js';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Loader2, CreditCard, CheckCircle, XCircle } from 'lucide-react';
+import getStripe from '@/lib/stripeClient';
+
+interface StripePaymentElementProps {
+  clientSecret: string;
+  amount: number;
+  onSuccess: (paymentIntentId: string) => void;
+  onError: (error: string) => void;
+  onCancel?: () => void;
+}
+
+const PaymentForm = ({ 
+  clientSecret, 
+  amount, 
+  onSuccess, 
+  onError,
+  onCancel 
+}: StripePaymentElementProps) => {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  
+  // Extract payment intent ID from client secret
+  const getPaymentIntentId = (secret: string) => {
+    const parts = secret.split('_secret_');
+    return parts[0] || '';
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!stripe || !elements) {
+      return;
+    }
+
+    setIsProcessing(true);
+    setErrorMessage(null);
+
+    try {
+      console.log('🔄 Confirming payment with Stripe...');
+      const { error, paymentIntent } = await stripe.confirmPayment({
+        elements,
+        confirmParams: {
+          return_url: `${window.location.origin}/payment-success`,
+        },
+        redirect: 'if_required',
+      });
+
+      console.log('📊 Payment confirmation result:', { error, paymentIntent: paymentIntent?.id, status: paymentIntent?.status });
+
+      if (error) {
+        console.error('❌ Payment error:', error);
+        setErrorMessage(error.message || 'Payment failed. Please try again.');
+        onError(error.message || 'Payment failed');
+        setIsProcessing(false);
+      } else if (paymentIntent) {
+        // Handle different payment intent statuses
+        const status = paymentIntent.status;
+        console.log('✅ Payment intent status:', status);
+        
+        if (status === 'succeeded') {
+          console.log('✅ Payment succeeded, calling onSuccess');
+          onSuccess(paymentIntent.id);
+        } else if (status === 'requires_capture') {
+          // Payment is authorized and ready to capture (manual capture mode)
+          console.log('✅ Payment authorized (requires_capture), calling onSuccess');
+          onSuccess(paymentIntent.id);
+        } else if (status === 'processing') {
+          // Payment is still processing - wait a bit and check again
+          console.log('⏳ Payment processing, checking status...');
+          setTimeout(async () => {
+            try {
+              const updatedIntent = await stripe.retrievePaymentIntent(clientSecret);
+              console.log('📊 Updated payment intent status:', updatedIntent.paymentIntent?.status);
+              if (updatedIntent.paymentIntent) {
+                const updatedStatus = updatedIntent.paymentIntent.status;
+                if (updatedStatus === 'succeeded' || updatedStatus === 'requires_capture') {
+                  console.log('✅ Payment completed, calling onSuccess');
+                  onSuccess(updatedIntent.paymentIntent.id);
+                } else if (updatedStatus === 'processing') {
+                  // Still processing, call success anyway as it's authorized
+                  console.log('✅ Payment authorized (processing), calling onSuccess');
+                  onSuccess(updatedIntent.paymentIntent.id);
+                } else {
+                  setErrorMessage(`Payment status: ${updatedStatus}. Please contact support.`);
+                  setIsProcessing(false);
+                }
+              }
+            } catch (pollError) {
+              console.error('❌ Error polling payment status:', pollError);
+              // Call success anyway as payment was confirmed
+              onSuccess(paymentIntent.id);
+            }
+          }, 1500);
+        } else if (status === 'requires_action') {
+          setErrorMessage('Payment requires additional authentication. Please complete the verification.');
+          setIsProcessing(false);
+        } else {
+          console.log('⚠️ Unexpected payment status:', status);
+          // For other statuses, still call success if payment was confirmed
+          if (status !== 'canceled' && status !== 'requires_payment_method') {
+            console.log('✅ Payment confirmed with status:', status, ', calling onSuccess');
+            onSuccess(paymentIntent.id);
+          } else {
+            setErrorMessage(`Payment status: ${status}. Please try again.`);
+            setIsProcessing(false);
+          }
+        }
+      } else {
+        console.warn('⚠️ No payment intent returned');
+        setErrorMessage('Payment processing. Please wait...');
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err.message : 'An unexpected error occurred';
+      setErrorMessage(error);
+      onError(error);
+      setIsProcessing(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-6">
+      <div className="space-y-4">
+        <PaymentElement 
+          options={{
+            layout: 'tabs'
+          }}
+        />
+      </div>
+
+      {errorMessage && (
+        <Alert variant="destructive">
+          <XCircle className="h-4 w-4" />
+          <AlertDescription>{errorMessage}</AlertDescription>
+        </Alert>
+      )}
+
+      <div className="flex gap-3">
+        <Button
+          type="submit"
+          disabled={!stripe || isProcessing}
+          className="flex-1"
+          style={{ backgroundColor: '#0846BC', color: 'white' }}
+        >
+          {isProcessing ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Processing...
+            </>
+          ) : (
+            <>
+              <CreditCard className="mr-2 h-4 w-4" />
+              Pay ${amount.toFixed(2)}
+            </>
+          )}
+        </Button>
+        {onCancel && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onCancel}
+            disabled={isProcessing}
+          >
+            Cancel
+          </Button>
+        )}
+      </div>
+    </form>
+  );
+};
+
+const StripePaymentElement = ({
+  clientSecret,
+  amount,
+  onSuccess,
+  onError,
+  onCancel
+}: StripePaymentElementProps) => {
+  const [stripePromise, setStripePromise] = useState<Promise<any> | null>(null);
+
+  useEffect(() => {
+    setStripePromise(getStripe());
+  }, []);
+
+  if (!stripePromise) {
+    return (
+      <Card className="p-6">
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="h-8 w-8 animate-spin" style={{ color: '#0846BC' }} />
+        </div>
+      </Card>
+    );
+  }
+
+  const options: StripeElementsOptions = {
+    clientSecret,
+    appearance: {
+      theme: 'stripe',
+      variables: {
+        colorPrimary: '#0846BC',
+        colorBackground: '#ffffff',
+        colorText: '#05070A',
+        colorDanger: '#ef4444',
+        fontFamily: 'system-ui, sans-serif',
+        spacingUnit: '4px',
+        borderRadius: '8px',
+      },
+    },
+  };
+
+  return (
+    <Elements stripe={stripePromise} options={options}>
+      <PaymentForm
+        clientSecret={clientSecret}
+        amount={amount}
+        onSuccess={onSuccess}
+        onError={onError}
+        onCancel={onCancel}
+      />
+    </Elements>
+  );
+};
+
+export default StripePaymentElement;

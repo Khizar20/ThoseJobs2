@@ -1,0 +1,167 @@
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { supabase } from '@/lib/supabaseClient';
+
+interface WorkerRouteGuardProps {
+  children: React.ReactNode;
+}
+
+const WorkerRouteGuard = ({ children }: WorkerRouteGuardProps) => {
+  const [isLoading, setIsLoading] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    checkAuthentication();
+  }, []);
+
+  const checkAuthentication = async () => {
+    try {
+      const userToken = localStorage.getItem('user_token');
+      const tokenData = localStorage.getItem('user_token_data');
+      const storedUserInfo = localStorage.getItem('user_info');
+      const userRolesStr = localStorage.getItem('user_roles');
+
+      // Check if mock token (for testing)
+      if (userToken && userToken.startsWith('mock-')) {
+        const userRoles = userRolesStr ? JSON.parse(userRolesStr) : [];
+        if (userRoles.includes('worker')) {
+          setIsAuthenticated(true);
+          return;
+        } else {
+          navigate('/login?role=worker');
+          return;
+        }
+      }
+
+      if (!userToken || !tokenData || !storedUserInfo) {
+        navigate('/login?role=worker');
+        return;
+      }
+
+      // Verify session with Supabase
+      const { data: { session }, error } = await supabase.auth.getSession();
+      
+      if (error || !session) {
+        handleLogout();
+        return;
+      }
+
+      // Verify user exists and has worker role
+      const userInfo = JSON.parse(storedUserInfo);
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('roles, role, *')
+        .eq('id', session.user.id)
+        .single();
+
+      if (userError || !userData) {
+        handleLogout();
+        return;
+      }
+
+      // Check if user is banned or flagged
+      const bio = userData.bio || "";
+      if (bio.includes("[BANNED:") || bio.includes("[FLAGGED (")) {
+        // User is banned or flagged - sign them out and redirect
+        await supabase.auth.signOut();
+        handleLogout();
+        
+        // Show alert message
+        const isBanned = bio.includes("[BANNED:");
+        const banMatch = bio.match(/\[BANNED:\s*(.+?)\s*-\s*\d{4}-\d{2}-\d{2}/);
+        const flagMatch = bio.match(/\[FLAGGED\s*\(([^)]+)\):\s*(.+?)\s*-\s*\d{4}-\d{2}-\d{2}/);
+        
+        if (isBanned) {
+          const banReason = banMatch ? banMatch[1] : "No reason provided";
+          alert(`Your account has been banned. Reason: ${banReason}. Please contact support if you believe this is an error.`);
+        } else {
+          const flagType = flagMatch ? flagMatch[1] : "unknown";
+          const flagReason = flagMatch ? flagMatch[2] : "No reason provided";
+          alert(`Your account has been flagged for review. Flag type: ${flagType}. Reason: ${flagReason}. Please contact support for assistance.`);
+        }
+        return;
+      }
+
+      // Check if user has worker role (support both old 'role' and new 'roles' array)
+      // Handle roles array - Supabase may return it as string or array
+      let userRoles: string[] = [];
+      if (userData.roles) {
+        if (Array.isArray(userData.roles)) {
+          userRoles = userData.roles;
+        } else if (typeof userData.roles === 'string') {
+          // Parse string representation of array
+          try {
+            userRoles = JSON.parse(userData.roles);
+          } catch (e) {
+            // If parsing fails, try to extract from string format
+            const match = userData.roles.match(/\[(.*?)\]/);
+            if (match) {
+              userRoles = match[1].split(',').map(r => r.trim().replace(/['"]/g, ''));
+            }
+          }
+        }
+      }
+      
+      // Fallback to old role field if roles array is empty
+      if (userRoles.length === 0 && userData.role) {
+        userRoles = [userData.role];
+      }
+      
+      // Check if user has worker role
+      if (!userRoles.includes('worker')) {
+        // User doesn't have worker role
+        console.error('User roles:', userRoles, 'User data:', userData);
+        navigate('/login?role=worker');
+        return;
+      }
+
+      // Update localStorage with latest user info
+      const userInfoWithRoles = {
+        ...userData,
+        roles: userRoles,
+        role: userRoles[0] || userData.role || 'worker'
+      };
+      localStorage.setItem('user_info', JSON.stringify(userInfoWithRoles));
+      localStorage.setItem('user_role', 'worker'); // Store selected role
+      localStorage.setItem('user_roles', JSON.stringify(userRoles)); // Store all roles
+
+      setIsAuthenticated(true);
+    } catch (error) {
+      console.error('Authentication check failed:', error);
+      handleLogout();
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('user_token');
+    localStorage.removeItem('user_token_data');
+    localStorage.removeItem('user_info');
+    localStorage.removeItem('user_role');
+    localStorage.removeItem('user_roles');
+    setIsAuthenticated(false);
+    navigate('/login?role=worker');
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="flex items-center gap-2">
+          <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+          <span>Verifying authentication...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return null;
+  }
+
+  return <>{children}</>;
+};
+
+export default WorkerRouteGuard;
+

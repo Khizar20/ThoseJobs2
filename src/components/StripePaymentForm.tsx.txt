@@ -1,0 +1,245 @@
+/**
+ * Stripe Payment Form Component
+ * Handles card payment processing with Stripe Elements
+ */
+
+import { useState, useEffect } from 'react';
+import { loadStripe, StripeElementsOptions } from '@stripe/stripe-js';
+import {
+  Elements,
+  CardElement,
+  useStripe,
+  useElements
+} from '@stripe/react-stripe-js';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useToast } from '@/hooks/use-toast';
+import { processCardPayment, confirmCardPayment } from '@/lib/paymentService';
+import { Loader2 } from 'lucide-react';
+
+const stripePromise = loadStripe(
+  import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || 
+  'pk_test_51SbJ0tIgAKWf1JItnx2UeInGfDF3gBTxhbQE8pHHQ6Vszue8Im5tvvKgLRgKDFwf1yH6cRTgeg1T0fD4fj7j25Iu00JUaL9VSA'
+);
+
+interface StripePaymentFormProps {
+  jobId: string;
+  amount: number;
+  requesterId: string;
+  workerId?: string;
+  onSuccess: () => void;
+  onCancel: () => void;
+}
+
+const PaymentFormContent = ({
+  jobId,
+  amount,
+  requesterId,
+  workerId,
+  onSuccess,
+  onCancel
+}: StripePaymentFormProps) => {
+  const stripe = useStripe();
+  const elements = useElements();
+  const { toast } = useToast();
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [paymentIntentId, setPaymentIntentId] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Create payment intent when component mounts
+    const createIntent = async () => {
+      try {
+        const response = await processCardPayment({
+          jobId,
+          paymentMethod: 'card',
+          amount,
+          userId: requesterId,
+          workerId,
+        });
+        setClientSecret(response.clientSecret);
+        setPaymentIntentId(response.paymentIntentId);
+      } catch (error) {
+        console.error('Error creating payment intent:', error);
+        toast({
+          title: 'Payment Error',
+          description: error instanceof Error ? error.message : 'Failed to initialize payment',
+          variant: 'destructive',
+        });
+      }
+    };
+
+    createIntent();
+  }, [jobId, amount, requesterId, workerId, toast]);
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+
+    if (!stripe || !elements || !clientSecret) {
+      return;
+    }
+
+    setIsProcessing(true);
+
+    try {
+      const cardElement = elements.getElement(CardElement);
+      if (!cardElement) {
+        throw new Error('Card element not found');
+      }
+
+      // Confirm payment with Stripe
+      const { error: confirmError, paymentIntent } = await stripe.confirmCardPayment(
+        clientSecret,
+        {
+          payment_method: {
+            card: cardElement,
+          },
+        }
+      );
+
+      if (confirmError) {
+        throw new Error(confirmError.message || 'Payment failed');
+      }
+
+      if (paymentIntent && paymentIntent.status === 'succeeded') {
+        // Confirm payment intent on backend
+        const result = await confirmCardPayment(paymentIntentId!, jobId);
+        
+        if (result.success) {
+          toast({
+            title: 'Payment Successful!',
+            description: 'Your payment has been processed successfully.',
+            variant: 'default',
+          });
+          onSuccess();
+        } else {
+          throw new Error(result.message);
+        }
+      }
+    } catch (error) {
+      console.error('Payment error:', error);
+      toast({
+        title: 'Payment Failed',
+        description: error instanceof Error ? error.message : 'Payment could not be processed',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const cardElementOptions = {
+    style: {
+      base: {
+        fontSize: '16px',
+        color: '#05070A',
+        '::placeholder': {
+          color: '#999',
+        },
+      },
+      invalid: {
+        color: '#ef4444',
+      },
+    },
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="p-4 border rounded-lg" style={{ borderColor: '#E5E5E5' }}>
+        <CardElement options={cardElementOptions} />
+      </div>
+      
+      <div className="flex justify-between items-center">
+        <div>
+          <p className="text-sm" style={{ color: '#666' }}>Total Amount</p>
+          <p className="text-2xl font-bold" style={{ color: '#05070A' }}>
+            ${amount.toFixed(2)}
+          </p>
+        </div>
+      </div>
+
+      <div className="flex gap-3">
+        <Button
+          type="button"
+          variant="outline"
+          onClick={onCancel}
+          disabled={isProcessing}
+          className="flex-1"
+        >
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          disabled={!stripe || isProcessing || !clientSecret}
+          className="flex-1"
+          style={{ backgroundColor: '#0846BC', color: 'white' }}
+        >
+          {isProcessing ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Processing...
+            </>
+          ) : (
+            `Pay $${amount.toFixed(2)}`
+          )}
+        </Button>
+      </div>
+    </form>
+  );
+};
+
+export const StripePaymentForm = (props: StripePaymentFormProps) => {
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Create payment intent
+    processCardPayment({
+      jobId: props.jobId,
+      paymentMethod: 'card',
+      amount: props.amount,
+      userId: props.requesterId,
+      workerId: props.workerId,
+    })
+      .then((response) => {
+        setClientSecret(response.clientSecret);
+      })
+      .catch((error) => {
+        console.error('Error creating payment intent:', error);
+      });
+  }, [props.jobId, props.amount, props.requesterId, props.workerId]);
+
+  const options: StripeElementsOptions = {
+    clientSecret: clientSecret || undefined,
+    appearance: {
+      theme: 'stripe' as const,
+    },
+  };
+
+  if (!clientSecret) {
+    return (
+      <Card>
+        <CardContent className="p-6">
+          <div className="flex items-center justify-center">
+            <Loader2 className="h-6 w-6 animate-spin" style={{ color: '#0846BC' }} />
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Elements stripe={stripePromise} options={options}>
+      <Card>
+        <CardHeader>
+          <CardTitle>Payment Information</CardTitle>
+          <CardDescription>
+            Enter your card details to complete the payment
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <PaymentFormContent {...props} />
+        </CardContent>
+      </Card>
+    </Elements>
+  );
+};

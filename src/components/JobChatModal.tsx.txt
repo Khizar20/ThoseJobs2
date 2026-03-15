@@ -1,0 +1,564 @@
+import { useState, useEffect, useRef } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/lib/supabaseClient";
+import { 
+  Send, 
+  X, 
+  Minimize2, 
+  Maximize2,
+  MessageSquare,
+  User
+} from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
+interface Message {
+  id: string;
+  job_id: string;
+  from_user_id: string;
+  to_user_id: string;
+  body: string;
+  attachment_url?: string;
+  attachment_type?: string;
+  is_read: boolean;
+  read_at?: string;
+  created_at: string;
+  from_user?: {
+    name: string;
+    profile_photo?: string;
+  };
+  to_user?: {
+    name: string;
+    profile_photo?: string;
+  };
+}
+
+interface JobChatModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  jobId: string;
+  jobTitle: string;
+  requesterId: string;
+  workerId: string;
+  workerName: string;
+  workerPhoto?: string;
+  isWorkerView?: boolean; // If true, this is from worker's perspective (requesterId is the other party)
+}
+
+const JobChatModal = ({
+  isOpen,
+  onClose,
+  jobId,
+  jobTitle,
+  requesterId,
+  workerId,
+  workerName,
+  workerPhoto,
+  isWorkerView = false
+}: JobChatModalProps) => {
+  // Determine current user and other party based on view
+  const currentUserId = isWorkerView ? workerId : requesterId;
+  const otherPartyId = isWorkerView ? requesterId : workerId;
+  const [otherPartyName, setOtherPartyName] = useState(isWorkerView ? 'Requester' : workerName);
+  const [otherPartyPhoto, setOtherPartyPhoto] = useState(isWorkerView ? undefined : workerPhoto);
+
+  // Fetch requester info if this is worker's view
+  useEffect(() => {
+    if (isWorkerView && isOpen && requesterId) {
+      const fetchRequesterInfo = async () => {
+        const { data } = await supabase
+          .from('users')
+          .select('name, profile_photo')
+          .eq('id', requesterId)
+          .single();
+        
+        if (data) {
+          setOtherPartyName(data.name || 'Requester');
+          setOtherPartyPhoto(data.profile_photo);
+        }
+      };
+      fetchRequesterInfo();
+    } else if (!isWorkerView) {
+      setOtherPartyName(workerName);
+      setOtherPartyPhoto(workerPhoto);
+    }
+  }, [isWorkerView, isOpen, requesterId, workerName, workerPhoto]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [newMessage, setNewMessage] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [currentUserName, setCurrentUserName] = useState<string>('You');
+  const [currentUserPhoto, setCurrentUserPhoto] = useState<string | undefined>(undefined);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const { toast } = useToast();
+
+  // Fetch current user info
+  useEffect(() => {
+    if (isOpen && currentUserId) {
+      const fetchCurrentUserInfo = async () => {
+        const { data } = await supabase
+          .from('users')
+          .select('name, profile_photo')
+          .eq('id', currentUserId)
+          .single();
+        
+        if (data) {
+          setCurrentUserName(data.name || 'You');
+          setCurrentUserPhoto(data.profile_photo);
+        }
+      };
+      fetchCurrentUserInfo();
+    }
+  }, [isOpen, currentUserId]);
+
+  // Scroll to bottom when new messages arrive
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  // Fetch messages and set up real-time subscription
+  useEffect(() => {
+    if (!isOpen || !jobId) return;
+
+    let subscription: any = null;
+
+    const fetchMessages = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('messages')
+          .select(`
+            *,
+            from_user:users!messages_from_user_id_fkey(id, name, profile_photo),
+            to_user:users!messages_to_user_id_fkey(id, name, profile_photo)
+          `)
+          .eq('job_id', jobId)
+          .order('created_at', { ascending: true });
+
+        // If foreign key relationship fails, fetch messages and users separately
+        if (error && (error.message?.includes('foreign key') || error.code === 'PGRST116')) {
+          const { data: messagesData, error: messagesError } = await supabase
+            .from('messages')
+            .select('*')
+            .eq('job_id', jobId)
+            .order('created_at', { ascending: true });
+
+          if (messagesError) throw messagesError;
+
+          // Fetch user details separately
+          const messagesWithUsers = await Promise.all((messagesData || []).map(async (msg: any) => {
+            const [fromUser, toUser] = await Promise.all([
+              supabase.from('users').select('id, name, profile_photo').eq('id', msg.from_user_id).single(),
+              supabase.from('users').select('id, name, profile_photo').eq('id', msg.to_user_id).single()
+            ]);
+
+            return {
+              ...msg,
+              from_user: fromUser.data || null,
+              to_user: toUser.data || null
+            };
+          }));
+
+          // Mark messages as read if they're sent to the current user
+          const unreadMessages = messagesWithUsers.filter(
+            (msg: any) => msg.to_user_id === currentUserId && !msg.is_read
+          );
+
+          if (unreadMessages.length > 0) {
+            const messageIds = unreadMessages.map((msg: any) => msg.id);
+            await supabase
+              .from('messages')
+              .update({ 
+                is_read: true, 
+                read_at: new Date().toISOString() 
+              })
+              .in('id', messageIds);
+          }
+
+          setMessages(messagesWithUsers);
+          return;
+        }
+
+        if (error) throw error;
+
+        // Mark messages as read if they're sent to the requester
+        const unreadMessages = (data || []).filter(
+          msg => msg.to_user_id === requesterId && !msg.is_read
+        );
+
+        if (unreadMessages.length > 0) {
+          const messageIds = unreadMessages.map(msg => msg.id);
+          await supabase
+            .from('messages')
+            .update({ 
+              is_read: true, 
+              read_at: new Date().toISOString() 
+            })
+            .in('id', messageIds);
+        }
+
+        setMessages(data || []);
+      } catch (error: any) {
+        console.error('Error fetching messages:', error);
+        toast({
+          title: "Error",
+          description: "Failed to load messages. Please try again.",
+          variant: "destructive"
+        });
+      }
+    };
+
+    fetchMessages();
+
+    // Set up real-time subscription for new messages
+    subscription = supabase
+      .channel(`job-chat-${jobId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `job_id=eq.${jobId}`
+        },
+        async (payload) => {
+          try {
+            const newMessageId = payload.new.id;
+            
+            // Check if message already exists (to prevent duplicates from optimistic updates)
+            setMessages(prev => {
+              const exists = prev.some(msg => msg.id === newMessageId);
+              if (exists) return prev; // Message already exists, skip
+              return prev; // Will be updated by async fetch below
+            });
+
+            // Fetch the new message with user details
+            const { data: newMsg, error: fetchError } = await supabase
+              .from('messages')
+              .select(`
+                *,
+                from_user:users!messages_from_user_id_fkey(id, name, profile_photo),
+                to_user:users!messages_to_user_id_fkey(id, name, profile_photo)
+              `)
+              .eq('id', newMessageId)
+              .single();
+
+            // If foreign key relationship fails, fetch user separately
+            if (fetchError && (fetchError.message?.includes('foreign key') || fetchError.code === 'PGRST116')) {
+              const { data: msgData } = await supabase
+                .from('messages')
+                .select('*')
+                .eq('id', newMessageId)
+                .single();
+
+              if (msgData) {
+                const [fromUser, toUser] = await Promise.all([
+                  supabase.from('users').select('id, name, profile_photo').eq('id', msgData.from_user_id).single(),
+                  supabase.from('users').select('id, name, profile_photo').eq('id', msgData.to_user_id).single()
+                ]);
+
+                const newMsgWithUsers = {
+                  ...msgData,
+                  from_user: fromUser.data || null,
+                  to_user: toUser.data || null
+                };
+
+                setMessages(prev => {
+                  // Check again if message exists (race condition protection)
+                  const alreadyExists = prev.some(msg => msg.id === newMsgWithUsers.id);
+                  if (alreadyExists) return prev;
+                  return [...prev, newMsgWithUsers];
+                });
+                
+                // Mark as read if it's for the current user
+                if (newMsgWithUsers.to_user_id === currentUserId) {
+                  await supabase
+                    .from('messages')
+                    .update({ 
+                      is_read: true, 
+                      read_at: new Date().toISOString() 
+                    })
+                    .eq('id', newMsgWithUsers.id);
+                }
+              }
+            } else if (newMsg) {
+              setMessages(prev => {
+                // Check again if message exists (race condition protection)
+                const alreadyExists = prev.some(msg => msg.id === newMsg.id);
+                if (alreadyExists) return prev;
+                return [...prev, newMsg];
+              });
+              
+              // Mark as read if it's for the current user
+              if (newMsg.to_user_id === currentUserId) {
+                await supabase
+                  .from('messages')
+                  .update({ 
+                    is_read: true, 
+                    read_at: new Date().toISOString() 
+                  })
+                  .eq('id', newMsg.id);
+              }
+            }
+          } catch (error) {
+            console.error('Error handling new message:', error);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      if (subscription) {
+        subscription.unsubscribe();
+      }
+    };
+  }, [isOpen, jobId, currentUserId, toast]);
+
+  // Send message
+  const sendMessage = async () => {
+    if (!newMessage.trim()) return;
+
+    const messageBody = newMessage.trim();
+    const tempId = `temp-${Date.now()}`;
+    
+    // Optimistically add message to UI immediately
+    const optimisticMessage: Message = {
+      id: tempId,
+      job_id: jobId,
+      from_user_id: currentUserId,
+      to_user_id: otherPartyId,
+      body: messageBody,
+      is_read: false,
+      created_at: new Date().toISOString(),
+      from_user: {
+        name: currentUserName,
+        profile_photo: currentUserPhoto
+      },
+      to_user: null
+    };
+
+    setMessages(prev => [...prev, optimisticMessage]);
+    setNewMessage('');
+    setIsLoading(true);
+
+    try {
+      const { data: insertedData, error } = await supabase
+        .from('messages')
+        .insert({
+          job_id: jobId,
+          from_user_id: currentUserId,
+          to_user_id: otherPartyId,
+          body: messageBody
+        })
+        .select(`
+          *,
+          from_user:users!messages_from_user_id_fkey(id, name, profile_photo),
+          to_user:users!messages_to_user_id_fkey(id, name, profile_photo)
+        `)
+        .single();
+
+      if (error) throw error;
+
+      // Replace optimistic message with real message from database
+      if (insertedData) {
+        setMessages(prev => {
+          // Remove optimistic message
+          const filtered = prev.filter(msg => msg.id !== tempId);
+          // Check if message already exists (from real-time subscription)
+          const exists = filtered.some(msg => msg.id === insertedData.id);
+          if (!exists) {
+            // Add real message if not already present
+            return [...filtered, insertedData as Message];
+          }
+          return filtered;
+        });
+      }
+    } catch (error: any) {
+      console.error('Error sending message:', error);
+      // Remove optimistic message on error
+      setMessages(prev => prev.filter(msg => msg.id !== tempId));
+      toast({
+        title: "Error",
+        description: error.message || "Failed to send message. Please try again.",
+        variant: "destructive"
+      });
+      setNewMessage(messageBody); // Restore message on error
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Handle Enter key
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  // Format message time
+  const formatMessageTime = (timestamp: string) => {
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
+    
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent 
+        className={`p-0 flex flex-col ${isMinimized ? 'h-16' : 'h-[600px] max-h-[90vh]'} [&>button]:hidden`}
+        style={{ backgroundColor: '#ffffff', borderColor: '#e5e7eb' }}
+      >
+        {/* Header */}
+        <DialogHeader className="px-4 py-3 border-b border-gray-200 flex-shrink-0" style={{ backgroundColor: '#f9fafb' }}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {otherPartyPhoto ? (
+                <img
+                  src={otherPartyPhoto}
+                  alt={otherPartyName}
+                  className="w-10 h-10 rounded-full object-cover"
+                />
+              ) : (
+                <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+                  <User className="w-5 h-5 text-primary" />
+                </div>
+              )}
+              <div>
+                <DialogTitle style={{ color: '#111827', fontSize: '16px', fontWeight: 600 }}>
+                  {otherPartyName}
+                </DialogTitle>
+                <DialogDescription style={{ color: '#6b7280', fontSize: '12px' }}>
+                  {jobTitle}
+                </DialogDescription>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsMinimized(!isMinimized)}
+                style={{ color: '#6b7280' }}
+              >
+                {isMinimized ? <Maximize2 className="w-4 h-4" /> : <Minimize2 className="w-4 h-4" />}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onClose}
+                style={{ color: '#6b7280' }}
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+          </div>
+        </DialogHeader>
+
+        {!isMinimized && (
+          <>
+            {/* Messages Area */}
+            <div 
+              className="flex-1 overflow-y-auto p-4 space-y-4"
+              style={{ backgroundColor: '#ffffff' }}
+            >
+              {messages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-center">
+                  <MessageSquare className="w-12 h-12 text-gray-300 mb-2" />
+                  <p style={{ color: '#6b7280', fontSize: '14px' }}>
+                    No messages yet. Start the conversation!
+                  </p>
+                </div>
+              ) : (
+                messages.map((message) => {
+                  const isCurrentUser = message.from_user_id === currentUserId;
+                  
+                  return (
+                    <div
+                      key={message.id}
+                      className={`flex ${isCurrentUser ? 'justify-end' : 'justify-start'}`}
+                    >
+                      <div
+                        className={`max-w-[70%] rounded-lg px-4 py-2 ${
+                          isCurrentUser
+                            ? 'bg-primary text-white'
+                            : 'bg-gray-100 text-gray-900'
+                        }`}
+                        style={
+                          isCurrentUser
+                            ? { backgroundColor: '#3b82f6', color: '#ffffff' }
+                            : { backgroundColor: '#f3f4f6', color: '#111827' }
+                        }
+                      >
+                        <p className="text-sm whitespace-pre-wrap break-words">
+                          {message.body}
+                        </p>
+                        <div className={`flex items-center gap-2 mt-1 text-xs ${
+                          isCurrentUser ? 'text-blue-100' : 'text-gray-500'
+                        }`}>
+                          <span>{formatMessageTime(message.created_at)}</span>
+                          {isCurrentUser && message.is_read && (
+                            <span>✓ Read</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Input Area */}
+            <div className="border-t border-gray-200 p-4 flex-shrink-0" style={{ backgroundColor: '#f9fafb' }}>
+              <div className="flex items-center gap-2">
+                <Input
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  placeholder="Type a message..."
+                  disabled={isLoading}
+                  className="flex-1"
+                  style={{ backgroundColor: '#ffffff', borderColor: '#d1d5db', color: '#111827' }}
+                />
+                <Button
+                  onClick={sendMessage}
+                  disabled={isLoading || !newMessage.trim()}
+                  style={{ backgroundColor: '#3b82f6', color: '#ffffff' }}
+                >
+                  <Send className="w-4 h-4" />
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+export default JobChatModal;

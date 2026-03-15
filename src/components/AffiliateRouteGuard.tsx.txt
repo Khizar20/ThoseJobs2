@@ -1,0 +1,142 @@
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { supabase } from '@/lib/supabaseClient';
+import { useToast } from '@/hooks/use-toast';
+
+interface AffiliateRouteGuardProps {
+  children: React.ReactNode;
+}
+
+const AffiliateRouteGuard = ({ children }: AffiliateRouteGuardProps) => {
+  const [isLoading, setIsLoading] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const navigate = useNavigate();
+  const { toast } = useToast();
+
+  useEffect(() => {
+    checkAuthentication();
+  }, []);
+
+  const checkAuthentication = async () => {
+    try {
+      // Verify session with Supabase first
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      
+      if (sessionError || !session) {
+        navigate('/login?role=affiliate');
+        return;
+      }
+
+      // Get user profile from database
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', session.user.id)
+        .single();
+
+      if (userError || !userData) {
+        navigate('/login?role=affiliate');
+        return;
+      }
+
+      // Check if user is banned or flagged
+      const bio = userData.bio || "";
+      if (bio.includes("[BANNED:") || bio.includes("[FLAGGED (")) {
+        // User is banned or flagged - sign them out and redirect
+        await supabase.auth.signOut();
+        localStorage.removeItem('user_token');
+        localStorage.removeItem('user_token_data');
+        localStorage.removeItem('user_info');
+        localStorage.removeItem('user_role');
+        localStorage.removeItem('user_roles');
+        
+        // Show alert message
+        const isBanned = bio.includes("[BANNED:");
+        const banMatch = bio.match(/\[BANNED:\s*(.+?)\s*-\s*\d{4}-\d{2}-\d{2}/);
+        const flagMatch = bio.match(/\[FLAGGED\s*\(([^)]+)\):\s*(.+?)\s*-\s*\d{4}-\d{2}-\d{2}/);
+        
+        if (isBanned) {
+          const banReason = banMatch ? banMatch[1] : "No reason provided";
+          alert(`Your account has been banned. Reason: ${banReason}. Please contact support if you believe this is an error.`);
+        } else {
+          const flagType = flagMatch ? flagMatch[1] : "unknown";
+          const flagReason = flagMatch ? flagMatch[2] : "No reason provided";
+          alert(`Your account has been flagged for review. Flag type: ${flagType}. Reason: ${flagReason}. Please contact support for assistance.`);
+        }
+        navigate('/login?role=affiliate');
+        return;
+      }
+
+      // Check if user has affiliate role
+      let userRoles: string[] = [];
+      if (userData.roles) {
+        if (Array.isArray(userData.roles)) {
+          userRoles = userData.roles;
+        } else if (typeof userData.roles === 'string') {
+          try {
+            userRoles = JSON.parse(userData.roles);
+          } catch (e) {
+            const match = userData.roles.match(/\[(.*?)\]/);
+            if (match) {
+              userRoles = match[1].split(',').map(r => r.trim().replace(/['"]/g, ''));
+            }
+          }
+        }
+      }
+      
+      if (userRoles.length === 0 && userData.role) {
+        userRoles = [userData.role];
+      }
+      
+      if (!userRoles.includes('affiliate')) {
+        navigate('/partners');
+        toast({
+          title: "Not an Affiliate",
+          description: "You are not registered as an affiliate. Please apply first.",
+          variant: "destructive"
+        });
+        return;
+      }
+
+      // Update localStorage
+      const userInfoWithRoles = {
+        ...userData,
+        roles: userRoles,
+        role: userRoles[0] || userData.role || 'affiliate'
+      };
+      localStorage.setItem('user_info', JSON.stringify(userInfoWithRoles));
+      localStorage.setItem('user_role', 'affiliate');
+      localStorage.setItem('user_roles', JSON.stringify(userRoles));
+      localStorage.setItem('user_token', session.access_token);
+      localStorage.setItem('user_token_data', JSON.stringify({
+        token: session.access_token,
+        timestamp: Date.now()
+      }));
+
+      setIsAuthenticated(true);
+    } catch (error) {
+      navigate('/login?role=affiliate');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="flex items-center gap-2">
+          <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+          <span>Verifying authentication...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return null;
+  }
+
+  return <>{children}</>;
+};
+
+export default AffiliateRouteGuard;

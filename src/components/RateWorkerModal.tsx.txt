@@ -1,0 +1,268 @@
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/lib/supabaseClient";
+import { Star, X } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
+interface RateWorkerModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  jobId: string;
+  workerId: string;
+  workerName: string;
+  requesterId: string;
+  onRatingSubmitted?: () => void | Promise<void>;
+}
+
+const RateWorkerModal = ({
+  isOpen,
+  onClose,
+  jobId,
+  workerId,
+  workerName,
+  requesterId,
+  onRatingSubmitted
+}: RateWorkerModalProps) => {
+  const [rating, setRating] = useState(0);
+  const [hoverRating, setHoverRating] = useState(0);
+  const [comment, setComment] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const { toast } = useToast();
+
+  const handleStarClick = (starRating: number) => {
+    setRating(starRating);
+  };
+
+  const handleStarHover = (starRating: number) => {
+    setHoverRating(starRating);
+  };
+
+  const handleStarLeave = () => {
+    setHoverRating(0);
+  };
+
+  const handleSubmit = async () => {
+    if (rating === 0) {
+      toast({
+        title: "Rating Required",
+        description: "Please select a rating before submitting.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      // First, try to find existing rating
+      const { data: existingRating, error: checkError } = await supabase
+        .from('ratings')
+        .select('id')
+        .eq('job_id', jobId)
+        .eq('from_user_id', requesterId)
+        .eq('to_user_id', workerId)
+        .maybeSingle();
+
+      // Handle check error (only throw if it's not a "not found" error)
+      if (checkError && checkError.code !== 'PGRST116') {
+        console.error('Check error:', checkError);
+        throw checkError;
+      }
+
+      let ratingData;
+      if (existingRating) {
+        // Update existing rating
+        const { data: updatedData, error: updateError } = await supabase
+          .from('ratings')
+          .update({
+            stars: rating,
+            comment: comment.trim() || null
+          })
+          .eq('id', existingRating.id)
+          .select()
+          .single();
+
+        if (updateError) {
+          console.error('Update error:', updateError);
+          throw updateError;
+        }
+        ratingData = updatedData;
+      } else {
+        // Insert new rating
+        const { data: insertedData, error: insertError } = await supabase
+          .from('ratings')
+          .insert({
+            job_id: jobId,
+            from_user_id: requesterId,
+            to_user_id: workerId,
+            stars: rating,
+            comment: comment.trim() || null
+          })
+          .select()
+          .single();
+
+        if (insertError) {
+          console.error('Insert error:', insertError);
+          throw insertError;
+        }
+        ratingData = insertedData;
+      }
+
+      toast({
+        title: "Rating Submitted",
+        description: "Thank you for rating this worker!",
+      });
+
+      // Reset form
+      setRating(0);
+      setComment('');
+      
+      // Call the callback if provided
+      if (onRatingSubmitted) {
+        try {
+          const result = onRatingSubmitted();
+          if (result instanceof Promise) {
+            await result;
+          }
+        } catch (error) {
+          console.error('Error in onRatingSubmitted callback:', error);
+        }
+      }
+      
+      onClose();
+    } catch (error: any) {
+      console.error('Error submitting rating:', error);
+      let errorMessage = "Failed to submit rating. Please try again.";
+      
+      if (error?.message) {
+        errorMessage = error.message;
+      } else if (error?.code) {
+        errorMessage = `Error code: ${error.code}. ${error.details || error.hint || ''}`;
+      }
+      
+      toast({
+        title: "Submission Failed",
+        description: errorMessage,
+        variant: "destructive"
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleClose = () => {
+    if (isSubmitting) return;
+    
+    setRating(0);
+    setComment('');
+    onClose();
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={handleClose}>
+      <DialogContent style={{ backgroundColor: '#ffffff', borderColor: '#e5e7eb' }}>
+        <DialogHeader>
+          <DialogTitle style={{ color: '#111827' }}>Rate {workerName}</DialogTitle>
+          <DialogDescription style={{ color: '#6b7280' }}>
+            How was your experience with this worker?
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-6">
+          {/* Star Rating */}
+          <div>
+            <Label style={{ color: '#111827', marginBottom: '12px', display: 'block' }}>
+              Rating *
+            </Label>
+            <div className="flex items-center gap-1">
+              {[1, 2, 3, 4, 5].map((star) => (
+                <button
+                  key={star}
+                  type="button"
+                  onClick={() => handleStarClick(star)}
+                  onMouseEnter={() => handleStarHover(star)}
+                  onMouseLeave={handleStarLeave}
+                  disabled={isSubmitting}
+                  className="focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 rounded-full p-1"
+                >
+                  <Star
+                    className={`w-8 h-8 transition-colors ${
+                      star <= (hoverRating || rating)
+                        ? 'fill-yellow-400 text-yellow-400'
+                        : 'text-gray-300'
+                    }`}
+                  />
+                </button>
+              ))}
+            </div>
+            <div className="mt-2 text-sm" style={{ color: '#6b7280' }}>
+              {rating > 0 && (
+                <span>
+                  {rating === 1 && 'Poor'}
+                  {rating === 2 && 'Fair'}
+                  {rating === 3 && 'Good'}
+                  {rating === 4 && 'Very Good'}
+                  {rating === 5 && 'Excellent'}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Comment */}
+          <div>
+            <Label htmlFor="comment" style={{ color: '#111827', marginBottom: '8px', display: 'block' }}>
+              Comment (Optional)
+            </Label>
+            <Textarea
+              id="comment"
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              placeholder="Share your experience..."
+              rows={4}
+              disabled={isSubmitting}
+              style={{ backgroundColor: '#f9fafb', borderColor: '#d1d5db', color: '#111827' }}
+            />
+          </div>
+
+          {/* Actions */}
+          <div className="flex gap-3">
+            <Button
+              variant="outline"
+              onClick={handleClose}
+              disabled={isSubmitting}
+              className="flex-1"
+              style={{ borderColor: '#d1d5db', color: '#111827' }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSubmit}
+              disabled={isSubmitting || rating === 0}
+              className="flex-1"
+              style={{ backgroundColor: '#3b82f6', color: '#ffffff' }}
+            >
+              {isSubmitting ? (
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Submitting...
+                </div>
+              ) : (
+                'Submit Rating'
+              )}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+export default RateWorkerModal;
