@@ -1,0 +1,103 @@
+import { Link } from "react-router-dom";
+import { Facebook, Instagram, Twitter, Mail, Phone, MapPin, Briefcase, User, Shield, Users, HelpCircle } from "lucide-react";
+
+export function Footer() {
+  return (
+    <footer className="border-t border-white/20" style={{ backgroundColor: '#0846BC' }}>
+      <div className="container mx-auto px-4 md:px-6 lg:px-8 py-8 md:py-12">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 md:gap-8">
+          {/* Brand */}
+          <div className="space-y-3 md:space-y-4">
+            <h3 className="font-heading font-bold text-lg md:text-xl text-white">ThoseJobs</h3>
+            <p className="text-sm md:text-base text-white/80">
+              Small tasks, local hands. Connect with verified Gig Doers in the Houston area for real-world tasks like property verifications, pickups, and more.
+            </p>
+            <div className="flex space-x-3 md:space-x-4">
+              <Facebook className="h-4 w-4 md:h-5 md:w-5 text-white/70 hover:text-white transition-colors cursor-pointer" />
+              <Instagram className="h-4 w-4 md:h-5 md:w-5 text-white/70 hover:text-white transition-colors cursor-pointer" />
+              <Twitter className="h-4 w-4 md:h-5 md:w-5 text-white/70 hover:text-white transition-colors cursor-pointer" />
+            </div>
+          </div>
+
+          {/* Quick Links */}
+          <div className="space-y-3 md:space-y-4">
+            <h4 className="font-semibold text-white text-sm md:text-base">Quick Links</h4>
+            <nav className="flex flex-col space-y-1 md:space-y-2">
+              <Link to="/browse-jobs" className="text-sm md:text-base text-white/80 hover:text-white transition-colors flex items-center gap-2">
+                <Briefcase className="h-3 w-3 md:h-4 md:w-4" />
+                Browse Jobs
+              </Link>
+              <Link to="/about" className="text-sm md:text-base text-white/80 hover:text-white transition-colors flex items-center gap-2">
+                <Shield className="h-3 w-3 md:h-4 md:w-4" />
+                How It Works
+              </Link>
+              <Link to="/choose-role" className="text-sm md:text-base text-white/80 hover:text-white transition-colors flex items-center gap-2">
+                <User className="h-3 w-3 md:h-4 md:w-4" />
+                Sign Up
+              </Link>
+              <Link to="/contact" className="text-sm md:text-base text-white/80 hover:text-white transition-colors flex items-center gap-2">
+                <Mail className="h-3 w-3 md:h-4 md:w-4" />
+                Contact
+              </Link>
+              <Link to="/partners" className="text-sm md:text-base text-white/80 hover:text-white transition-colors flex items-center gap-2">
+                <Users className="h-3 w-3 md:h-4 md:w-4" />
+                Partners
+              </Link>
+              <Link to="/help" className="text-sm md:text-base text-white/80 hover:text-white transition-colors flex items-center gap-2">
+                <HelpCircle className="h-3 w-3 md:h-4 md:w-4" />
+                Help Center
+              </Link>
+            </nav>
+          </div>
+
+          {/* Job Categories */}
+          <div className="space-y-3 md:space-y-4">
+            <h4 className="font-semibold text-white text-sm md:text-base">Job Categories</h4>
+            <nav className="flex flex-col space-y-1 md:space-y-2">
+              <Link to="/browse-jobs?category=Photos" className="text-sm md:text-base text-white/80 hover:text-white transition-colors">
+                Photos
+              </Link>
+              <Link to="/browse-jobs?category=Pickup/Dropoff" className="text-sm md:text-base text-white/80 hover:text-white transition-colors">
+                Pickup/Dropoff
+              </Link>
+              <Link to="/browse-jobs?category=Walkthrough" className="text-sm md:text-base text-white/80 hover:text-white transition-colors">
+                Walkthrough
+              </Link>
+              <Link to="/browse-jobs?category=Signage" className="text-sm md:text-base text-white/80 hover:text-white transition-colors">
+                Signage
+              </Link>
+              <Link to="/browse-jobs?category=Other" className="text-sm md:text-base text-white/80 hover:text-white transition-colors">
+                Other Tasks
+              </Link>
+            </nav>
+          </div>
+
+          {/* Contact Info */}
+          <div className="space-y-3 md:space-y-4">
+            <h4 className="font-semibold text-white text-sm md:text-base">Contact Info</h4>
+            <div className="space-y-2 md:space-y-3">
+              <div className="flex items-center space-x-2">
+                <MapPin className="h-3 w-3 md:h-4 md:w-4 text-white/70" />
+                <span className="text-sm md:text-base text-white/80">Houston Area, TX</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Phone className="h-3 w-3 md:h-4 md:w-4 text-white/70" />
+                <span className="text-sm md:text-base text-white/80">(713) 555-1234</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Mail className="h-3 w-3 md:h-4 md:w-4 text-white/70" />
+                <span className="text-sm md:text-base text-white/80">hello@thosejobs.com</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-white/20 mt-6 md:mt-8 pt-6 md:pt-8 text-center">
+          <p className="text-xs md:text-sm text-white/70">
+            © 2024 ThoseJobs. All rights reserved. Small tasks, local hands - connecting Houston area with verified Gig Doers.
+          </p>
+        </div>
+      </div>
+    </footer>
+  );
+}
